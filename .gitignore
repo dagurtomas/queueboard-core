@@ -2,3 +2,4 @@ __pycache__/
 .env
 test/gh-pages
 test/api
+celerybeat-schedule*
