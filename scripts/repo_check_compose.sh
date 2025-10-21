@@ -15,7 +15,7 @@ trap cleanup EXIT
 # Ensure we run from the repo root so docker compose picks up the local project
 cd "$(dirname "$0")/.."
 
-echo "[1/3] Starting web (waits on db:healthy via depends_on)"
+echo "[1/4] Starting web (waits on db:healthy via depends_on)"
 if ! docker compose up -d web; then
   echo "Compose failed to start services. Dumping service status and migrate logs..." >&2
   docker compose ps || true
@@ -23,10 +23,13 @@ if ! docker compose up -d web; then
   exit 1
 fi
 
-echo "[2/3] Django system checks (compose)"
+echo "[2/4] Django system checks (compose)"
 docker compose exec -T web python qb_site/manage.py check
 
-echo "[3/3] Dry-run makemigrations (compose)"
+echo "[3/4] Dry-run makemigrations (compose)"
 docker compose exec -T web python qb_site/manage.py makemigrations --dry-run --check
+
+echo "[4/4] Run syncer tests (compose)"
+docker compose exec -T web python qb_site/manage.py test syncer
 
 echo "Compose checks completed."
