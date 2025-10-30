@@ -181,16 +181,12 @@ class ReviewerSuggestion(NamedTuple):
     suggested: str | None
 
 
-# Suggest potential reviewers for a single pull request with given number.
-# We return all reviewers whose top-level interest have the best possible match
-# for this PR.
-def suggest_reviewers(
-    existing_assignments: dict[str, Tuple[List[int], float, int]],
+# first pass at finding reviewers
+# does not take availability / capacity into account
+def match_reviewers(
     reviewers: List[ReviewerInfo],
-    number: int,
     info: AggregatePRInfo,
-    all_info: dict[int, AggregatePRInfo],  # aggregate information about all PRs
-) -> ReviewerSuggestion:
+):
     # Look at all topic labels of this PR, and find all suitable reviewers.
     topic_labels = [lab.name for lab in info.labels if lab.name.startswith("t-") or lab.name in ["CI", "IMO", "tech debt"]]
     # Each reviewer, together with the list of top-level areas
@@ -207,6 +203,19 @@ def suggest_reviewers(
     else:
         # Do not propose a PR's author as potential reviewer.
         matching_reviewers = [(rev, []) for rev in reviewers if rev.github != info.author]
+    return (topic_labels, matching_reviewers)
+
+
+# Suggest potential reviewers for a single pull request with given number.
+# We return all reviewers whose top-level interest have the best possible match
+# for this PR.
+def suggest_reviewers(
+    existing_assignments: dict[str, Tuple[List[int], float, int]],
+    reviewers: List[ReviewerInfo],
+    number: int,
+    info: AggregatePRInfo,
+) -> ReviewerSuggestion:
+    topic_labels, matching_reviewers = match_reviewers(reviewers, info)
 
     # Future: decide how to customise and filter the output, lots of possibilities!
     # - no and one reviewer look sensible already
@@ -290,12 +299,73 @@ def suggest_reviewers_many(
     suggestions = {}
     stats = existing_assignments.copy()
     for number in prs_to_assign:
-        suggested = suggest_reviewers(stats, reviewers, number, info[number], info).suggested
+        suggested = suggest_reviewers(stats, reviewers, number, info[number]).suggested
         if suggested is None:
-            print(f"warning: no suitable review was found for PR {number}")
+            print(f"warning: no suitable reviewer was found for PR {number}")
             continue
         suggestions[number] = suggested
         (prs, n_weighted, n_all) = stats.get(suggested) or ([], 0, 0)
         prs.append(number)
         stats[suggested] = (prs, n_weighted + 1, n_all + 1)
     return suggestions
+
+
+# For each label in topic labels + "CI" + "IMO" + "tech debt",
+# return:
+# - open_prs: number of open PRs with that label
+# - queue_prs: number of queue PRs with that label
+# - assignable_prs: number of PRs that have a matching reviewer
+# - unassigned_prs: number of PRs that are unassigned
+# - total_capacity: sum of max_capacity of reviewers with that label
+# - free_capacity: sum of (max_capacity - # of assigned PRs) of reviewers
+# When at maximum capacity, how many unassigned PRs are there?
+def review_capacities(
+    reviewers: List[ReviewerInfo],
+    open_prs: List[int],  # open prs
+    queue_prs: List[int],  # prs in queue
+    all_info: dict[int, AggregatePRInfo],  # aggregate information about all PRs
+):
+    # reviewer_github_set = set([reviewer.github for reviewer in reviewers])
+    reviewer_assignments: dict[str, int] = {}
+    label_data = {}
+    # loop over all prs
+    for pr in open_prs:
+        info = all_info[pr]
+        for user in info.assignees:
+            # update reviewer assignment count
+            reviewer_assignments[user] = reviewer_assignments.get(user, 0) + 1
+
+        topic_labels = [lab.name for lab in info.labels if lab.name.startswith("t-") or lab.name in ["CI", "IMO", "tech debt"]]
+        # loop over labels
+        for label in topic_labels:
+            # count PRs in topic label
+            data = label_data.get(label, {})
+            data["open_prs"] = data.get("open_prs", 0) + 1
+            label_data[label] = data
+
+    # loop over prs on queue
+    for pr in queue_prs:
+        info = all_info[pr]
+        topic_labels, matching_reviewers = match_reviewers(reviewers, info)  # does not take capacity / availability into account
+
+        # loop over labels
+        for label in topic_labels:
+            # count PRs in topic label
+            data = label_data.get(label, {})
+            data["queue_prs"] = data.get("queue_prs", 0) + 1
+            data["assignable_prs"] = data.get("assignable_prs", 0) + (1 if len(matching_reviewers) > 0 else 0)
+            data["unassigned_prs"] = data.get("unassigned_prs", 0) + (1 if len(info.assignees) == 0 else 0)
+            label_data[label] = data
+
+    # loop over reviewers
+    for rev in reviewers:
+        if rev.is_on_rotation and not rev.is_temporarily_off_rotation:
+            capacity = max(rev.maximum_capacity - reviewer_assignments[rev.github], 0)
+            # aggregate review capacity for each label
+            for label in rev.top_level:
+                data = label_data.get(label, {})
+                data["total_capacity"] = data.get("total_capacity", 0) + rev.maximum_capacity
+                data["free_capacity"] = data.get("free_capacity", 0) + capacity
+                label_data[label] = data
+
+    return label_data
